@@ -1,14 +1,10 @@
 from collections import defaultdict, deque
-
-
 class StreamingHypergraph:
-
     def __init__(self):
         self.hyperedges = defaultdict(lambda: defaultdict(int))
         self.flow_history = deque()
 
     def add_flow(self,source_ip,destination_ip,destination_port,timestamp):
-    # Store the flow so that it can be removed later
         flow = (timestamp,source_ip,destination_ip,destination_port)
         self.flow_history.append(flow)
         self.hyperedges[source_ip][destination_port] += 1
@@ -30,8 +26,6 @@ class StreamingHypergraph:
             source_ip = oldest_flow[1]
             destination_ip = oldest_flow[2]
             destination_port = oldest_flow[3]
-
-            # Stop once the oldest flow is still inside the window
             if current_time - timestamp <= window_size:
                 break
 
@@ -60,6 +54,6 @@ class StreamingHypergraph:
         vertices = set()
 
         for ports in self.hyperedges.values():
-            vertices.update(ports)
+            vertices.update(ports.keys())
 
         return len(vertices)
