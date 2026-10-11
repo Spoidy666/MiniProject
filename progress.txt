@@ -1,0 +1,328 @@
+================================================================================
+                    SYSTEM FOLDER PROGRESS & STATUS TRACKER
+================================================================================
+Project: Streaming Hypergraph Network Intrusion Detection System (NIDS)
+Target Attack: Port Scan Detection
+Dataset: CIC-IDS-2017 PortScan (PCAP ISCX CSV)
+
+
+================================================================================
+1. QUICK STATUS OVERVIEW TABLE
+================================================================================
+
+File Name                   | Category          | Status             | Description
+----------------------------+-------------------+--------------------+------------------------------------------------------
+dataManipulation.py         | Data Cleaning     | COMPLETE           | Cleans data, validates IP/ports, extracts 9 NRF, binary labels, stream generator.
+hypergraph.py               | Data Structure    | COMPLETE           | Streaming hypergraph with deque history and sliding-window expiration.
+timeWindow.py               | Window Utility    | COMPLETE           | 5-minute time window tracker to trigger feature extraction.
+s_closeness.py              | Algorithm (Old)   | DEPRECATED         | Early prototype of s-closeness centrality. Completely commented out.
+sClosenessFeatureExtractor.py| Feature Extractor | COMPLETE           | Calibrates 11 s-values, computes s-closeness centrality (12 features/IP).
+hgiFeatureBuilder.py        | Feature Fusion    | COMPLETE           | Combines 9 NRF + 12 hypergraph features into 21-feature HGI matrix.
+hgi_model.py                | ML Classifier     | PARTIALLY COMPLETE | Trains LightGBM model. Missing model saving/loading and threshold tuning.
+streamingTest.py            | Integration Pipeline| PARTIALLY COMPLETE | 80/20 train/stream simulation. Missing cumulative metrics over time.
+test.py                     | Unit Test         | TEST ONLY          | Tests data cleaning and sliding-window expiration on 5 synthetic flows.
+test_s_closeness.py         | Unit Test         | TEST ONLY          | Tests s-closeness on synthetic flows. Outdated (imports commented-out file).
+
+
+================================================================================
+2. DETAILED BREAKDOWN OF EVERY FILE
+================================================================================
+
+--------------------------------------------------------------------------------
+FILE 1: dataManipulation.py
+--------------------------------------------------------------------------------
+Role: Data cleaning, preprocessing, feature selection, and flow generator.
+Status: COMPLETE
+
+What it does:
+- clean_dataset():
+  * Coerces numerical columns to float/int.
+  * Replaces infinite and -infinite values with NaN and drops them.
+  * Removes negative-duration network flows.
+  * Validates all Source and Destination IPv4 addresses.
+  * Validates Destination Port numbers (range 0 to 65535).
+  * Converts timestamps to pandas datetime and drops invalid rows.
+  * Removes duplicate network flows.
+  * Sorts dataset chronologically by Timestamp.
+- prepare_labels():
+  * Maps labels into binary classes: BENIGN = 0, PORT SCAN = 1.
+- prepare_data():
+  * Separates the 9 Network Raw Features (NRF):
+    1. Flow Duration
+    2. Total Fwd Packets
+    3. Total Backward Packets
+    4. Total Length of Fwd Packets
+    5. Total Length of Bwd Packets
+    6. Flow Bytes/s
+    7. Flow Packets/s
+    8. Down/Up Ratio
+    9. Protocol
+  * Separates stream metadata (Flow ID, Source/Dest IP, Ports, Protocol, Timestamp).
+  * Separates hypergraph columns (Source IP, Dest IP, Dest Port, Timestamp).
+  * Separates evaluation metadata (Flow ID, Label).
+- stream_flows():
+  * Generator function that yields rows one by one to simulate real-time streaming.
+
+What is missing / Next steps:
+- Feature set is currently fixed to the 9 NRF features from the base paper.
+  If you want to experiment with more features later, this can be parameterized.
+
+
+--------------------------------------------------------------------------------
+FILE 2: hypergraph.py
+--------------------------------------------------------------------------------
+Role: Dynamic streaming hypergraph data structure.
+Status: COMPLETE
+
+What it does:
+- Implements the StreamingHypergraph class.
+- Modeling logic:
+  * Destination ports act as vertices (nodes).
+  * IP addresses act as hyperedges (an IP is connected to all destination ports it touches).
+- Flow tracking:
+  * Uses a collections.deque (flow_history) to store incoming flows chronologically.
+- add_flow(source_ip, destination_ip, destination_port, timestamp):
+  * Appends the flow tuple to history.
+  * Increments port connection counter for both source_ip and destination_ip hyperedges.
+- remove_expired_flows(current_time, window_size):
+  * Pops flows from the front of the deque older than (current_time - window_size).
+  * Decrements port counts and deletes hyperedges when counts drop to zero.
+- Helper methods:
+  * get_hyperedge(ip), get_hyperedges()
+  * number_of_hyperedges(), number_of_vertices()
+
+What is missing / Next steps:
+- Working as intended for dynamic sliding-window hypergraphs.
+
+
+--------------------------------------------------------------------------------
+FILE 3: timeWindow.py
+--------------------------------------------------------------------------------
+Role: Time window coordinator for triggering periodic batch analysis.
+Status: COMPLETE
+
+What it does:
+- Implements TimeWindow class.
+- Configured with a duration (e.g., window_size = 5 minutes).
+- start(timestamp): Sets the initial start time of the window.
+- is_complete(timestamp): Checks if (current_timestamp - start_timestamp >= window_size).
+- reset(timestamp): Resets the start time to the current timestamp.
+
+What is missing / Next steps:
+- Minimal, clean utility class. Fully complete for its role.
+
+
+--------------------------------------------------------------------------------
+FILE 4: s_closeness.py
+--------------------------------------------------------------------------------
+Role: Initial prototype for calculating s-closeness centrality using HyperNetX.
+Status: DEPRECATED (INACTIVE PROTOTYPE)
+
+What it does:
+- Contained SClosenessAnalyzer class.
+- Implemented the base paper's skip-interval formula:
+  target = 70% of max hyperedge size
+  k = round((target - 3) / 10)
+  s_values = [3 + n * k for n in range(11)]
+- Converted streaming hypergraph into a HyperNetX Hypergraph.
+- Computed s_closeness_centrality for all 11 s-values.
+
+Why it is marked Deprecated / Incomplete:
+- The entire file is currently COMMENTED OUT with '#' on every line.
+- Its logic was cleanly extracted, refactored, and improved into
+  sClosenessFeatureExtractor.py.
+- This file can either be kept as backup reference or archived.
+
+
+--------------------------------------------------------------------------------
+FILE 5: sClosenessFeatureExtractor.py
+--------------------------------------------------------------------------------
+Role: Production feature extractor for hypergraph s-closeness centrality.
+Status: COMPLETE
+
+What it does:
+- Implements SClosenessFeatureExtractor class (active version of s_closeness.py).
+- build_hypergraph(streaming_hg):
+  * Converts custom StreamingHypergraph into a HyperNetX Hypergraph.
+- calibrate(streaming_hg):
+  * Finds the maximum hyperedge size across all IPs.
+  * Calculates the skip interval k.
+  * Generates the 11 calibrated s-values: [3, 3+k, 3+2k, ..., 3+10k].
+- compute_centrality(streaming_hg):
+  * Runs HyperNetX s_closeness_centrality(H, s=s, edges=True) for each of the 11 s-values.
+  * Returns a dictionary: {s_value: {ip: centrality_score}}.
+- get_ip_features(centrality, ip):
+  * For a given IP, extracts its 11 centrality scores.
+  * Computes the 12th feature: sum of all 11 centrality scores.
+  * Returns a 12-element list.
+
+What is missing / Next steps:
+- HyperNetX s-closeness computation can become slow when the hypergraph has thousands
+  of nodes. Consider optimizing or caching if processing very large streams.
+
+
+--------------------------------------------------------------------------------
+FILE 6: hgiFeatureBuilder.py
+--------------------------------------------------------------------------------
+Role: Feature fusion engine (Network Raw Features + Hypergraph Features).
+Status: COMPLETE
+
+What it does:
+- Implements HGIFeatureBuilder class.
+- Defines HGI (Hypergraph Information) feature schema:
+  * 9 NRF columns (Flow Duration, Packets, Lengths, Bytes/s, Packets/s, Ratio, Protocol)
+  * 11 s-closeness centrality columns (s_closeness_3, s_closeness_14, etc.)
+  * 1 s-closeness sum column (s_closeness_sum)
+  * TOTAL: 21 features.
+- build_features(flows, nrf_data, centrality):
+  * For each flow in the batch, grabs the Destination IP.
+  * Looks up the 12 hypergraph centrality features for that IP.
+  * Combines them with the 9 NRF values.
+  * Returns a 21-column pandas DataFrame.
+
+What is missing / Next steps:
+- Currently iterates using a Python for-loop ('for i in range(len(flows))').
+  Vectorizing this using a DataFrame map/merge will make it much faster on large datasets.
+
+
+--------------------------------------------------------------------------------
+FILE 7: hgi_model.py
+--------------------------------------------------------------------------------
+Role: Machine learning classifier for benign vs port scan detection.
+Status: PARTIALLY COMPLETE
+
+What it does:
+- Implements train_hgi_model(X, y):
+  * Performs an internal 80/20 stratified train/test split on training data.
+  * Configures a LightGBM Classifier (LGBMClassifier):
+    - objective: binary
+    - n_estimators: 100
+    - learning_rate: 0.05
+    - num_leaves: 31
+  * Fits the model on X_train, y_train.
+  * Evaluates on X_test, printing:
+    - Accuracy, Precision, Recall, F1 Score
+    - Classification Report (BENIGN vs PORT SCAN)
+    - Confusion Matrix
+  * Returns the trained LightGBM model.
+
+What is missing / Next steps:
+- Model Persistence: No function to save (joblib.dump / pickle) or load the trained model.
+- Inference Wrapper: Model prediction is called raw in scripts; lacks a standalone predict()
+  helper with customizable decision thresholds.
+- Hyperparameter Tuning: Settings are currently hardcoded defaults.
+
+
+--------------------------------------------------------------------------------
+FILE 8: streamingTest.py
+--------------------------------------------------------------------------------
+Role: End-to-end integration and streaming simulation script.
+Status: PARTIALLY COMPLETE (FUNCTIONAL PROTOTYPE)
+
+What it does:
+- End-to-end test pipeline:
+  1. Loads CSV and cleans dataset via dataManipulation.
+  2. Splits dataset temporally into 80% Training flows and 20% Streaming flows.
+  3. Training Phase:
+     - Feeds the 80% flows into StreamingHypergraph.
+     - Calibrates 11 s-values and computes centrality on the training graph.
+     - Builds 21-feature HGI training DataFrame.
+     - Trains the LightGBM model using train_hgi_model.
+  4. Streaming Phase:
+     - Initializes an empty streaming hypergraph and 5-minute TimeWindow.
+     - Streams the remaining 20% flows one by one.
+     - Evicts flows older than 5 minutes.
+     - When a 5-minute window completes:
+       * Computes hypergraph centrality for current state.
+       * Builds HGI features for flows in that window.
+       * Runs model.predict() and prints prediction vs actual distributions.
+       * Resets window and repeats.
+
+What is missing / Next steps:
+- Streaming Performance Tracking: Currently just prints class distributions to console.
+  It does not aggregate running F1 score, False Alarm Rate, or detection delays over time.
+- Modularity: Code is written in one long main() script rather than reusable classes.
+
+
+--------------------------------------------------------------------------------
+FILE 9: test.py
+--------------------------------------------------------------------------------
+Role: Verification test script for data cleaning and sliding-window expiration.
+Status: TEST ONLY
+
+What it does:
+- Loads and tests dataset cleaning on the PortScan CSV.
+- Tests StreamingHypergraph with 5 hardcoded synthetic flows:
+  * IP 10.0.0.1 -> 192.168.1.10 on ports 80, 443
+  * IP 10.0.0.2 -> 192.168.1.10 on ports 22, 443
+- Tests expiration by advancing time to 10:06:00 and 10:10:00 with a 5-minute window.
+- Prints hyperedge dictionaries before and after expiration to verify correct cleanup.
+
+
+--------------------------------------------------------------------------------
+FILE 10: test_s_closeness.py
+--------------------------------------------------------------------------------
+Role: Verification test script for s-closeness centrality on synthetic IP behaviors.
+Status: TEST ONLY (OUTDATED)
+
+What it does:
+- Simulates 3 distinct IP behaviors:
+  * IP 1 (192.168.1.10): Scans 10 common ports (21, 22, 23, 25, 53, 80, 110, 135, 139, 443).
+  * IP 2 (192.168.1.20): Normal traffic to 2 common ports (80, 443).
+  * IP 3 (192.168.1.30): Traffic to 4 alternate ports (8080, 8443, 9000, 9999).
+- Tries to run SClosenessAnalyzer from s_closeness.py to see resulting centrality scores.
+
+Why it is Outdated:
+- s_closeness.py is commented out, so running this script directly will raise an ImportError
+  until updated to import SClosenessFeatureExtractor.
+
+
+================================================================================
+3. SYSTEM ARCHITECTURE & DATA FLOW
+================================================================================
+
+Raw CSV (CIC-IDS-2017)
+         |
+         v
+ [dataManipulation.py]  --> Cleans, sorts chronologically, prepares 9 NRF features
+         |
+         +---------------------------------------+
+         |                                       |
+    (First 80%)                             (Last 20%)
+    Training Data                           Streaming Data
+         |                                       |
+         v                                       v
+ [hypergraph.py]                         [hypergraph.py] (Sliding 5-min window)
+ (Build full training graph)             (Add flow, evict expired flows)
+         |                                       |
+         v                                       v
+ [sClosenessFeatureExtractor.py]         [sClosenessFeatureExtractor.py]
+ (Calibrate 11 s-values & compute)       (Compute centrality every 5 minutes)
+         |                                       |
+         v                                       v
+ [hgiFeatureBuilder.py]                  [hgiFeatureBuilder.py]
+ (9 NRF + 12 Centrality = 21 Features)   (Build 21 features for current window)
+         |                                       |
+         v                                       v
+ [hgi_model.py] ------------------------> Model Prediction & Evaluation
+ (Train LightGBM Classifier)
+
+
+================================================================================
+4. RECOMMENDED NEXT STEPS TO COMPLETE THE SYSTEM
+================================================================================
+
+1. Model Saving & Loading (in hgi_model.py):
+   Add save_model(model, path) and load_model(path) using joblib so you don't have
+   to retrain the model every time you run streaming tests.
+
+2. Fast Feature Lookup (in hgiFeatureBuilder.py):
+   Replace the row-by-row for-loop with a dictionary map on Destination IP to make
+   feature creation 50x-100x faster during streaming.
+
+3. Streaming Metrics Logging (in streamingTest.py):
+   Save window-by-window evaluation results (Accuracy, Precision, Recall, F1, False Negatives)
+   to a CSV or plot so you can show how the model performs across time.
+
+4. Clean up Outdated Files:
+   Update test_s_closeness.py to use sClosenessFeatureExtractor.py.
