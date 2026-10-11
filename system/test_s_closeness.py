@@ -1,7 +1,11 @@
 from datetime import datetime, timedelta
 
 import hypergraph
-from s_closeness import SClosenessAnalyzer
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+# IMPORT PRODUCTION FEATURE EXTRACTOR INSTEAD OF COMMENTED-OUT S_CLOSENESS
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+from sClosenessFeatureExtractor import SClosenessFeatureExtractor
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000
 hg = hypergraph.StreamingHypergraph()
 
 
@@ -59,10 +63,17 @@ print("\nHyperedge sizes:")
 
 for ip, ports in hg.get_hyperedges().items():
     print(ip, len(ports))
-# Start with s = 1
-analyzer = SClosenessAnalyzer()
 
-results = analyzer.compute(hg)
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+# CALIBRATE AND COMPUTE CENTRALITY USING PRODUCTION EXTRACTOR
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+extractor = SClosenessFeatureExtractor()
+s_values = extractor.calibrate(hg)
+print(f"\nCalibrated s-values (count={len(s_values)}):", s_values)
 
-print("\nS-closeness:")
-print(results)
+results = extractor.compute_centrality(hg)
+
+print("\nS-closeness Results:")
+for s, scores in results.items():
+    print(f"  s={s}: {scores}")
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000

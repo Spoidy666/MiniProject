@@ -1,3 +1,16 @@
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+# NEW IMPORTS FOR MODEL PERSISTENCE AND ARTIFACT MANAGEMENT
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+import os
+import pickle
+from datetime import datetime
+try:
+    import joblib
+    HAS_JOBLIB = True
+except ImportError:
+    HAS_JOBLIB = False
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+
 import lightgbm as lgb
 
 from sklearn.model_selection import train_test_split
@@ -11,7 +24,7 @@ from sklearn.metrics import (
 )
 
 
-def train_hgi_model(X, y):
+def train_hgi_model(X, y, save_path=None, s_values=None, feature_names=None):
 
     # Internal train/test split ONLY inside the 80% training dataset.
     X_train, X_test, y_train, y_test = train_test_split(
@@ -99,7 +112,78 @@ def train_hgi_model(X, y):
         )
     )
 
+    # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+    # COLLECT METRICS DICTIONARY AND SAVE MODEL ARTIFACT IF REQUESTED
+    # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+    metrics = {
+        "accuracy": float(accuracy_score(y_test, predictions)),
+        "precision": float(precision_score(y_test, predictions, zero_division=0)),
+        "recall": float(recall_score(y_test, predictions, zero_division=0)),
+        "f1_score": float(f1_score(y_test, predictions, zero_division=0)),
+        "confusion_matrix": confusion_matrix(y_test, predictions, labels=[0, 1]).tolist(),
+        "test_samples": int(len(y_test)),
+        "train_samples": int(len(y_train))
+    }
+
+    if save_path:
+        save_hgi_model(
+            model=model,
+            filepath=save_path,
+            s_values=s_values,
+            feature_names=feature_names,
+            training_metrics=metrics
+        )
+    # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+
     return model
+
+
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+# MODEL SAVING AND LOADING FUNCTIONS (ARTIFACT MANAGEMENT)
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+def save_hgi_model(model, filepath, s_values=None, feature_names=None, training_metrics=None):
+    """
+    Saves the trained LightGBM model along with calibrated s-values,
+    feature names, and training metrics into a persistent artifact.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+    artifact = {
+        "model": model,
+        "s_values": s_values,
+        "feature_names": feature_names,
+        "training_metrics": training_metrics,
+        "saved_at": datetime.now().isoformat()
+    }
+    if HAS_JOBLIB:
+        joblib.dump(artifact, filepath)
+    else:
+        with open(filepath, "wb") as f:
+            pickle.dump(artifact, f)
+    print(f"\n[Artifact Saved] Successfully saved HGI model and configuration to: {filepath}")
+
+
+def load_hgi_model(filepath):
+    """
+    Loads a saved HGI model artifact from disk and returns the artifact dictionary.
+    Keys: 'model', 's_values', 'feature_names', 'training_metrics', 'saved_at'
+    """
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Model artifact not found at: {filepath}")
+
+    if HAS_JOBLIB:
+        artifact = joblib.load(filepath)
+    else:
+        with open(filepath, "rb") as f:
+            artifact = pickle.load(f)
+
+    print(f"\n[Artifact Loaded] Successfully loaded HGI model from: {filepath}")
+    if artifact.get("s_values"):
+        print(f"  Loaded calibrated s-values: {artifact['s_values']}")
+    if artifact.get("training_metrics"):
+        tm = artifact["training_metrics"]
+        print(f"  Internal Training Metrics -> Accuracy: {tm.get('accuracy', 0):.4f}, F1: {tm.get('f1_score', 0):.4f}")
+    return artifact
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000
 
 
 

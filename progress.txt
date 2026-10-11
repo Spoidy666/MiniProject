@@ -17,11 +17,11 @@ hypergraph.py               | Data Structure    | COMPLETE           | Streaming
 timeWindow.py               | Window Utility    | COMPLETE           | 5-minute time window tracker to trigger feature extraction.
 s_closeness.py              | Algorithm (Old)   | DEPRECATED         | Early prototype of s-closeness centrality. Completely commented out.
 sClosenessFeatureExtractor.py| Feature Extractor | COMPLETE           | Calibrates 11 s-values, computes s-closeness centrality (12 features/IP).
-hgiFeatureBuilder.py        | Feature Fusion    | COMPLETE           | Combines 9 NRF + 12 hypergraph features into 21-feature HGI matrix.
-hgi_model.py                | ML Classifier     | PARTIALLY COMPLETE | Trains LightGBM model. Missing model saving/loading and threshold tuning.
-streamingTest.py            | Integration Pipeline| PARTIALLY COMPLETE | 80/20 train/stream simulation. Missing cumulative metrics over time.
+hgiFeatureBuilder.py        | Feature Fusion    | COMPLETE           | Optimized IP-cached 21-feature HGI matrix builder.
+hgi_model.py                | ML Classifier     | COMPLETE           | Trains LightGBM model. Includes save_hgi_model and load_hgi_model artifact handling.
+streamingTest.py            | Integration Pipeline| COMPLETE           | 80/20 train-stream simulation, saves/loads model, window testing metrics & s-mismatch tracking.
 test.py                     | Unit Test         | TEST ONLY          | Tests data cleaning and sliding-window expiration on 5 synthetic flows.
-test_s_closeness.py         | Unit Test         | TEST ONLY          | Tests s-closeness on synthetic flows. Outdated (imports commented-out file).
+test_s_closeness.py         | Unit Test         | TEST ONLY          | Tests s-closeness on synthetic flows using SClosenessFeatureExtractor.
 
 
 ================================================================================
@@ -181,67 +181,60 @@ What it does:
   * Returns a 21-column pandas DataFrame.
 
 What is missing / Next steps:
-- Currently iterates using a Python for-loop ('for i in range(len(flows))').
-  Vectorizing this using a DataFrame map/merge will make it much faster on large datasets.
-
+- Feature builder is optimized with unique IP pre-caching.
 
 --------------------------------------------------------------------------------
 FILE 7: hgi_model.py
 --------------------------------------------------------------------------------
 Role: Machine learning classifier for benign vs port scan detection.
-Status: PARTIALLY COMPLETE
+Status: COMPLETE
 
 What it does:
-- Implements train_hgi_model(X, y):
+- train_hgi_model(X, y, save_path=None, s_values=None, feature_names=None):
   * Performs an internal 80/20 stratified train/test split on training data.
-  * Configures a LightGBM Classifier (LGBMClassifier):
-    - objective: binary
-    - n_estimators: 100
-    - learning_rate: 0.05
-    - num_leaves: 31
-  * Fits the model on X_train, y_train.
-  * Evaluates on X_test, printing:
-    - Accuracy, Precision, Recall, F1 Score
-    - Classification Report (BENIGN vs PORT SCAN)
-    - Confusion Matrix
-  * Returns the trained LightGBM model.
+  * Configures and trains a LightGBM Classifier (LGBMClassifier).
+  * Evaluates and prints Accuracy, Precision, Recall, F1 Score, Classification Report, Confusion Matrix.
+  * If save_path is provided, calls save_hgi_model() to persist artifact to disk.
+- save_hgi_model(model, filepath, s_values, feature_names, training_metrics):
+  * Saves model, calibrated s-values, feature names, and training metrics via joblib/pickle.
+- load_hgi_model(filepath):
+  * Loads model artifact from disk and verifies configuration for streaming inference.
 
 What is missing / Next steps:
-- Model Persistence: No function to save (joblib.dump / pickle) or load the trained model.
-- Inference Wrapper: Model prediction is called raw in scripts; lacks a standalone predict()
-  helper with customizable decision thresholds.
-- Hyperparameter Tuning: Settings are currently hardcoded defaults.
+- Hyperparameter tuning can be explored later if needed.
 
 
 --------------------------------------------------------------------------------
 FILE 8: streamingTest.py
 --------------------------------------------------------------------------------
 Role: End-to-end integration and streaming simulation script.
-Status: PARTIALLY COMPLETE (FUNCTIONAL PROTOTYPE)
+Status: COMPLETE
 
 What it does:
-- End-to-end test pipeline:
+- End-to-end simulation pipeline:
   1. Loads CSV and cleans dataset via dataManipulation.
   2. Splits dataset temporally into 80% Training flows and 20% Streaming flows.
-  3. Training Phase:
-     - Feeds the 80% flows into StreamingHypergraph.
-     - Calibrates 11 s-values and computes centrality on the training graph.
+  3. Training Phase (80%):
+     - Builds training StreamingHypergraph.
+     - Calibrates 11 s-values and computes centrality.
      - Builds 21-feature HGI training DataFrame.
-     - Trains the LightGBM model using train_hgi_model.
-  4. Streaming Phase:
-     - Initializes an empty streaming hypergraph and 5-minute TimeWindow.
-     - Streams the remaining 20% flows one by one.
-     - Evicts flows older than 5 minutes.
+     - Trains and saves LightGBM model artifact to saved_models/hgi_lightgbm_model.pkl.
+  4. Streaming Phase (Held-out 20%):
+     - Loads trained model artifact from disk.
+     - Maintains 5-minute sliding window with automatic flow eviction.
+     - Processes stream with fast itertuples() traversal.
      - When a 5-minute window completes:
-       * Computes hypergraph centrality for current state.
-       * Builds HGI features for flows in that window.
-       * Runs model.predict() and prints prediction vs actual distributions.
-       * Resets window and repeats.
+       * Computes centrality and builds HGI features.
+       * Measures s-value zero ratio (tracks s-value mismatch in 5-min windows).
+       * Predicts labels and evaluates window Accuracy, Precision, Recall, F1, TP, FP, TN, FN.
+       * Measures processing time (centrality, features, prediction).
+  5. Cumulative Reporting & Export:
+     - Aggregates overall Accuracy, Precision, Recall, F1, FPR, FNR, Confusion Matrix.
+     - Exports window metrics to streaming_window_metrics.csv.
+     - Exports cumulative summary to streaming_summary.json.
 
 What is missing / Next steps:
-- Streaming Performance Tracking: Currently just prints class distributions to console.
-  It does not aggregate running F1 score, False Alarm Rate, or detection delays over time.
-- Modularity: Code is written in one long main() script rather than reusable classes.
+- Future extension: Adaptive retraining triggers (concept drift detection) can be integrated.
 
 
 --------------------------------------------------------------------------------

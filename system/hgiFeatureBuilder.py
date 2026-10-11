@@ -34,25 +34,24 @@ class HGIFeatureBuilder:
                 "flows and nrf_data must contain "
                 "the same number of rows."
             )
-        feature_rows = []
-        for i in range(len(flows)):
+        # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+        # OPTIMIZED FEATURE EXTRACTION WITH IP CACHE
+        # Pre-computes 12 hypergraph features per unique IP and fast-merges with NRF rows
+        # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+        unique_ips = flows[self.ip_column].unique()
+        ip_cache = {
+            ip: self.extractor.get_ip_features(centrality, ip)
+            for ip in unique_ips
+        }
 
-            # Get the IP from the DataFrame row
-            ip = flows.iloc[i][self.ip_column]
+        ips = flows[self.ip_column].tolist()
+        nrf_list = nrf_data.values.tolist()
 
-            # Get the s-closeness features for this IP
-            hg_features = self.extractor.get_ip_features(
-                centrality,
-                ip
-            )
-
-            # Get the 9 NRF features
-            nrf_features = nrf_data.iloc[i].tolist()
-
-            # 9 NRF + 11 s-closeness + 1 sum = 21
-            row = nrf_features + hg_features
-
-            feature_rows.append(row)
+        feature_rows = [
+            nrf_row + ip_cache[ip]
+            for nrf_row, ip in zip(nrf_list, ips)
+        ]
+        # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
 
         return pd.DataFrame(
             feature_rows,
