@@ -2,15 +2,62 @@ import pandas as pd
 import numpy as np
 import ipaddress
 
+#000000000000000000000000000000000000000000000000000000000000000
+#gpu acceleration
+_CUDF_LOGGED = False
+
+
+def check_cudf_available():
+    """
+    Checks if RAPIDS cuDF is available for GPU-accelerated DataFrame processing.
+    """
+    global _CUDF_LOGGED
+    try:
+        import cudf
+        if not _CUDF_LOGGED:
+            print("[cuDF] GPU detected (RAPIDS cuDF). Running DataFrames on GPU.")
+            _CUDF_LOGGED = True
+        return True
+    except (ImportError, Exception):
+        if not _CUDF_LOGGED:
+            print("[cuDF] cuDF (GPU) not available, running on CPU (Pandas).")
+            _CUDF_LOGGED = True
+        return False
+
+
 def is_valid_ip(value):
     try:
         ipaddress.ip_address(value)
         return True
     except ValueError:
         return False
-def clean_dataset(dataset):
 
-    print("\nOriginal shape before cleaning is :", dataset.shape,"\n") # (286467, 85) kitti
+
+def clean_dataset(dataset):
+    print("\nOriginal shape before cleaning is :", dataset.shape, "\n")
+
+    # Attempt GPU acceleration with cuDF if available
+    if check_cudf_available():
+        try:
+            import cudf
+            gdf = cudf.from_pandas(dataset) if not isinstance(dataset, cudf.DataFrame) else dataset.copy()
+            gdf.columns = [c.strip() for c in gdf.columns]
+            nrf_cols = [
+                'Flow Duration', 'Total Fwd Packets', 'Total Backward Packets',
+                'Total Length of Fwd Packets', 'Total Length of Bwd Packets',
+                'Flow Bytes/s', 'Flow Packets/s', 'Down/Up Ratio', 'Protocol'
+            ]
+            required_cols = ['Source IP', 'Destination IP', 'Destination Port', 'Timestamp', 'Label']
+            for col in nrf_cols:
+                if col in gdf.columns:
+                    gdf[col] = cudf.to_numeric(gdf[col], errors='coerce')
+            gdf = gdf.dropna(subset=nrf_cols + required_cols)
+            gdf = gdf[gdf['Flow Duration'] >= 0]
+            print("[cuDF] Dataset cleaning successfully executed on GPU.")
+            return gdf.to_pandas()
+        except Exception as e:
+            print(f"[cuDF] GPU cleaning failed ({type(e).__name__}), falling back to Pandas CPU.")
+
     df = dataset.copy()
     df.columns = [c.strip() for c in df.columns]
     nrf_cols = [

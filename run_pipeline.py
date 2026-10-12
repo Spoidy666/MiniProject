@@ -6,12 +6,56 @@ from hypergraph_nids.simulation import NetworkSimulation
 csv_path = r"c:\Users\vaish\Desktop\Projects\MiniProject\dataset\Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv"
 
 
+def print_device_info():
+    print("================== HARDWARE & ACCELERATION STATUS ==================")
+    detected_gpus = []
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"],
+            text=True, stderr=subprocess.DEVNULL
+        ).strip().splitlines()
+        detected_gpus = [g.strip() for g in out if g.strip()]
+    except Exception:
+        pass
+
+    if detected_gpus:
+        print(f"Physical GPU(s) Detected : {', '.join(detected_gpus)}")
+    else:
+        print("Physical GPU(s) Detected : None / Standard Display Adapter")
+
+    has_cuda = False
+    try:
+        import torch
+        has_cuda = torch.cuda.is_available()
+    except Exception:
+        pass
+
+    has_opencl = False
+    try:
+        import ctypes
+        ocl = ctypes.windll.LoadLibrary('OpenCL.dll')
+        has_opencl = ocl is not None
+    except Exception:
+        pass
+
+    print(f"CUDA Framework (NVIDIA)  : {'Available' if has_cuda else 'Not Available'}")
+    print(f"OpenCL Framework (AMD)   : {'Available' if has_opencl else 'Not Available'}")
+    print("====================================================================\n")
+
+
 def main():
+    print_device_info()
     print("==================================================")
     # 1. Load and clean the dataset
     print(f"Loading dataset from: {csv_path} ...")
     t0 = time.time()
-    raw_df = pd.read_csv(csv_path)
+    try:
+        import cudf
+        print("[cuDF] GPU detected. Loading CSV with RAPIDS cuDF...")
+        raw_df = cudf.read_csv(csv_path).to_pandas()
+    except (ImportError, Exception):
+        raw_df = pd.read_csv(csv_path)
     print(f"Loaded {len(raw_df)} records in {time.time() - t0:.2f} seconds.")
     
     print("Preprocessing and cleaning dataset...")

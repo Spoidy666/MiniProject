@@ -23,6 +23,19 @@ from sklearn.metrics import (
     confusion_matrix
 )
 
+#000000000000000000000000000000000000000000000000000000000000000000000000000000000
+#for gpu acceleration
+def get_lightgbm_device():
+    try:
+        import torch
+        if torch.cuda.is_available():
+            print("[LightGBM] GPU detected. Using device='gpu'.")
+            return 'gpu'
+    except ImportError:
+        pass
+    print("[LightGBM] GPU not detected or unavailable, running on CPU.")
+    return 'cpu'
+
 
 def train_hgi_model(X, y, save_path=None, s_values=None, feature_names=None):
 
@@ -37,19 +50,37 @@ def train_hgi_model(X, y, save_path=None, s_values=None, feature_names=None):
 
     print("\nTraining HGI LightGBM model...")
 
+    device = get_lightgbm_device()   #for gpu acceleration
     model = lgb.LGBMClassifier(
         objective="binary",
         n_estimators=100,
         learning_rate=0.05,
         num_leaves=31,
         random_state=42,
-        verbosity=-1
+        verbosity=-1,   
+        device=device
     )
 
-    model.fit(
-        X_train,
-        y_train
-    )
+    #000000000000000000000000000000000000000000000000000000000000000000000000000000000
+    #try catch for gpu 
+
+    try:
+        model.fit(
+            X_train,
+            y_train
+        )
+        if device != 'cpu':
+            print("[LightGBM] Training successfully executed on GPU.")
+    except Exception as e:
+        if device != 'cpu':
+            print(f"[LightGBM] GPU fit failed ({type(e).__name__}), switching to CPU.")
+            model.set_params(device='cpu')
+            model.fit(
+                X_train,
+                y_train
+            )
+        else:
+            raise e
 
     predictions = model.predict(X_test)
 

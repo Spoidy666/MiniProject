@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from .models import EnsembleNIDS
+from .models import EnsembleNIDS, SafeLGBMClassifier
 from .hypergraph import HypergraphFeatureExtractor, clean_dataset
 
 def generate_adversarial_example_proxy(substitute_model, x, features_to_perturb=[0, 1, 3, 5, 6, 7], step_size=0.1, max_steps=10):
@@ -54,8 +54,7 @@ class NetworkSimulation:
         self.ensemble.fit(self.X_nrf_train, self.X_hgi_train, self.X_hga_train, self.y_train)
         
         # Fit substitute model for ZOO attack
-        from lightgbm import LGBMClassifier
-        self.substitute_model = LGBMClassifier(random_state=42, verbosity=-1, n_jobs=-1)
+        self.substitute_model = SafeLGBMClassifier(random_state=42, verbosity=-1, n_jobs=-1)
         self.substitute_model.fit(self.X_nrf_train, self.y_train)
         
     def run_case(self, case_id, TH=5, epochs=30, num_computers=10):
@@ -221,8 +220,7 @@ class NetworkSimulation:
                                 
                         elif case_id == 3:
                             # FTW: Retrain candidate model (e.g. HGI)
-                            from lightgbm import LGBMClassifier
-                            candidate_hgi = LGBMClassifier(random_state=42, verbosity=-1, n_jobs=-1)
+                            candidate_hgi = SafeLGBMClassifier(random_state=42, verbosity=-1, n_jobs=-1)
                             candidate_hgi.fit(X_hgi_retrain, y_retrain)
                             
                             # Evaluate on training data

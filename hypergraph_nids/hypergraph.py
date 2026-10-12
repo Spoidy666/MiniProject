@@ -7,6 +7,47 @@ from scipy.sparse.csgraph import connected_components, shortest_path
 # Fixed weights for nonhacker pairs of IPs
 NON_HACKER_WEIGHTS = np.array([0.2, 0.15, 0.1, 0.05, 0.04, 0.03, 0.02, 0.01, 0.008, 0.006, 0.005])
 
+_CUDF_LOGGED = False
+_GRAPH_GPU_LOGGED = False
+
+
+def check_cudf_available():
+    """
+    Checks if RAPIDS cuDF is available for GPU-accelerated DataFrame processing.
+    """
+    global _CUDF_LOGGED
+    try:
+        import cudf
+        if not _CUDF_LOGGED:
+            print("[cuDF] GPU detected (RAPIDS cuDF). Running DataFrames on GPU.")
+            _CUDF_LOGGED = True
+        return True
+    except (ImportError, Exception):
+        if not _CUDF_LOGGED:
+            print("[cuDF] cuDF (GPU) not available, running on CPU (Pandas).")
+            _CUDF_LOGGED = True
+        return False
+
+
+def check_graph_gpu_available():
+    """
+    Checks if CuPy / cuGraph is available for GPU-accelerated matrix operations.
+    """
+    global _GRAPH_GPU_LOGGED
+    try:
+        import cupy as cp
+        import cupyx.scipy.sparse as cp_sp
+        if not _GRAPH_GPU_LOGGED:
+            print("[Hypergraph] GPU detected (CuPy). Accelerating matrix operations on GPU.")
+            _GRAPH_GPU_LOGGED = True
+        return True
+    except (ImportError, Exception):
+        if not _GRAPH_GPU_LOGGED:
+            print("[Hypergraph] CuPy/cuGraph (GPU) not available, running on CPU (SciPy/NetworkX).")
+            _GRAPH_GPU_LOGGED = True
+        return False
+
+
 def clean_dataset(df):
     """
     Cleans the CIC-IDS2017 dataset by:
@@ -14,7 +55,31 @@ def clean_dataset(df):
     2. Filtering out rows with negative flow duration.
     3. Dropping rows with NaN/Inf values.
     4. Relabeling all non-BENIGN labels as 'PORT SCAN'.
+    Uses GPU cuDF if available, otherwise falls back to Pandas on CPU.
     """
+    # Attempt GPU acceleration with cuDF if installed
+    if check_cudf_available():
+        try:
+            import cudf
+            gdf = cudf.from_pandas(df) if not isinstance(df, cudf.DataFrame) else df.copy()
+            gdf.columns = [c.strip() for c in gdf.columns]
+            nrf_cols = [
+                'Flow Duration', 'Total Fwd Packets', 'Total Backward Packets',
+                'Total Length of Fwd Packets', 'Total Length of Bwd Packets',
+                'Flow Bytes/s', 'Flow Packets/s', 'Down/Up Ratio', 'Protocol'
+            ]
+            for col in nrf_cols:
+                if col in gdf.columns:
+                    gdf[col] = cudf.to_numeric(gdf[col], errors='coerce')
+            gdf = gdf.dropna(subset=nrf_cols + ['Source IP', 'Destination IP', 'Destination Port', 'Label'])
+            gdf = gdf[gdf['Flow Duration'] >= 0]
+            gdf['Label'] = gdf['Label'].str.strip().str.upper()
+            gdf['Label'] = gdf['Label'].where(gdf['Label'] == 'BENIGN', 'PORT SCAN')
+            print("[cuDF] Dataset cleaning successfully executed on GPU.")
+            return gdf.to_pandas()
+        except Exception as e:
+            print(f"[cuDF] GPU cleaning failed ({type(e).__name__}), falling back to Pandas CPU.")
+
     df_clean = df.copy()
     df_clean.columns = [c.strip() for c in df_clean.columns]
     
@@ -106,8 +171,19 @@ class HypergraphFeatureExtractor:
         self.k = max(1, int(round((0.7 * self.M - 3) / 10)))
         self.s_values = [3 + n * self.k for n in range(11)]
         
-        # Compute A * A^T
-        C = A.dot(A.T)
+        # Compute A * A^T (CuPy GPU acceleration if available, else SciPy CPU)
+        if check_graph_gpu_available():
+            try:
+                import cupyx.scipy.sparse as cp_sp
+                A_gpu = cp_sp.csr_matrix(A)
+                C_gpu = A_gpu.dot(A_gpu.T)
+                C = C_gpu.get()
+                print("[Hypergraph] Matrix multiplication successfully executed on GPU (CuPy).")
+            except Exception as e:
+                print(f"[Hypergraph] CuPy matrix dot failed ({type(e).__name__}), switching to SciPy CPU.")
+                C = A.dot(A.T)
+        else:
+            C = A.dot(A.T)
         
         # Compute centralities for each s
         centralities_matrix = np.zeros((len(self.ips), 11))

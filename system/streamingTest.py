@@ -42,9 +42,48 @@ MODEL_FILE = os.path.join(MODEL_DIR, "hgi_lightgbm_model.pkl")
 RESULTS_CSV = os.path.join(SCRIPT_DIR, "streaming_window_metrics.csv")
 SUMMARY_JSON = os.path.join(SCRIPT_DIR, "streaming_summary.json")
 # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+# HARDWARE AND ACCELERATION STATUS BANNER
+# 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+def print_device_info():
+    print("================== HARDWARE & ACCELERATION STATUS ==================")
+    detected_gpus = []
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"],
+            text=True, stderr=subprocess.DEVNULL
+        ).strip().splitlines()
+        detected_gpus = [g.strip() for g in out if g.strip()]
+    except Exception:
+        pass
+
+    if detected_gpus:
+        print(f"Physical GPU(s) Detected : {', '.join(detected_gpus)}")
+    else:
+        print("Physical GPU(s) Detected : None / Standard Display Adapter")
+
+    has_cuda = False
+    try:
+        import torch
+        has_cuda = torch.cuda.is_available()
+    except Exception:
+        pass
+
+    has_opencl = False
+    try:
+        import ctypes
+        ocl = ctypes.windll.LoadLibrary('OpenCL.dll')
+        has_opencl = ocl is not None
+    except Exception:
+        pass
+
+    print(f"CUDA Framework (NVIDIA)  : {'Available' if has_cuda else 'Not Available'}")
+    print(f"OpenCL Framework (AMD)   : {'Available' if has_opencl else 'Not Available'}")
+    print("====================================================================\n")
 
 
 def main():
+    print_device_info()
     print("=" * 80)
     print(" ADAPTIVE STREAMING HYPERGRAPH INTRUSION DETECTION SYSTEM (NIDS)")
     print(" Target: Port Scan Detection | Dataset: CIC-IDS-2017")
@@ -53,7 +92,12 @@ def main():
     # 1. Load and prepare dataset
     print(f"\n[1/5] Loading raw network flows from: {CSV_PATH}")
     t0 = time.time()
-    dataset = pd.read_csv(CSV_PATH)
+    try:
+        import cudf
+        print("[cuDF] GPU detected. Loading CSV with RAPIDS cuDF...")
+        dataset = cudf.read_csv(CSV_PATH).to_pandas()
+    except (ImportError, Exception):
+        dataset = pd.read_csv(CSV_PATH)
     print(f"Loaded {len(dataset):,} raw records in {time.time() - t0:.2f}s")
 
     print("\n[2/5] Cleaning dataset and formatting binary labels...")
@@ -85,65 +129,76 @@ def main():
     print(f"  Training Flows (First 80%) : {len(train_indices):,}")
     print(f"  Streaming Flows (Held-out 20%): {len(stream_indices):,}")
 
-    # 3. Training Phase (80% Split)
-    print("\n[4/5] Training Phase: Constructing Hypergraph & Calibrating Model...")
-    t0_train = time.time()
-    training_hg = StreamingHypergraph()
-    extractor = SClosenessFeatureExtractor()
+    # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+    # REUSE EXISTING TRAINED MODEL ARTIFACT TO SKIP RETRAINING
+    # If the model has already been trained and saved, load it directly to save ~1.7 hours.
+    # Otherwise, execute the full training and hypergraph construction phase.
+    # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+    if os.path.exists(MODEL_FILE):
+        print(f"\n[4/5] Found existing trained model artifact at: {MODEL_FILE}")
+        print("  Skipping heavy training phase and loading saved model directly...")
+        artifact = load_hgi_model(MODEL_FILE)
+        streaming_model = artifact["model"]
+        s_values = artifact["s_values"]
+        extractor = SClosenessFeatureExtractor()
+        extractor.s_values = s_values
+    else:
+        # 3. Training Phase (80% Split)
+        print("\n[4/5] Training Phase: Constructing Hypergraph & Calibrating Model...")
+        t0_train = time.time()
+        training_hg = StreamingHypergraph()
+        extractor = SClosenessFeatureExtractor()
 
-    for source_ip, destination_ip, destination_port, timestamp in \
-            train_hypergraph_data.itertuples(index=False):
-        training_hg.add_flow(
-            source_ip,
-            destination_ip,
-            destination_port,
-            timestamp
+        for source_ip, destination_ip, destination_port, timestamp in \
+                train_hypergraph_data.itertuples(index=False):
+            training_hg.add_flow(
+                source_ip,
+                destination_ip,
+                destination_port,
+                timestamp
+            )
+
+        print(f"  Training Graph built: {training_hg.number_of_hyperedges():,} Hyperedges, {training_hg.number_of_vertices():,} Vertices")
+
+        s_values = extractor.calibrate(training_hg)
+        print(f"  Calibrated 11 s-values: {s_values}")
+
+        print("  Computing training hypergraph centrality...")
+        t0_cent = time.time()
+        training_centrality = extractor.compute_centrality(training_hg)
+        print(f"  Training centrality computed in {time.time() - t0_cent:.2f}s")
+
+        training_feature_builder = HGIFeatureBuilder(
+            extractor,
+            ip_column="Destination IP"
         )
 
-    print(f"  Training Graph built: {training_hg.number_of_hyperedges():,} Hyperedges, {training_hg.number_of_vertices():,} Vertices")
+        print("  Building 21-dimensional HGI features for training flows...")
+        t0_feat = time.time()
+        X_train_hgi = training_feature_builder.build_features(
+            train_stream_data,
+            train_nrf,
+            training_centrality
+        )
+        print(f"  HGI features generated in {time.time() - t0_feat:.2f}s (Shape: {X_train_hgi.shape})")
 
-    s_values = extractor.calibrate(training_hg)
-    print(f"  Calibrated 11 s-values: {s_values}")
+        y_train = train_metadata["Label"].reset_index(drop=True)
+        X_train_hgi = X_train_hgi.reset_index(drop=True)
 
-    print("  Computing training hypergraph centrality...")
-    t0_cent = time.time()
-    training_centrality = extractor.compute_centrality(training_hg)
-    print(f"  Training centrality computed in {time.time() - t0_cent:.2f}s")
+        feature_names = training_feature_builder.get_feature_names()
+        print(f"\n  Training LightGBM model and saving artifact to: {MODEL_FILE}")
+        _ = train_hgi_model(
+            X=X_train_hgi,
+            y=y_train,
+            save_path=MODEL_FILE,
+            s_values=s_values,
+            feature_names=feature_names
+        )
+        print(f"  Training phase completed in {time.time() - t0_train:.2f}s")
 
-    training_feature_builder = HGIFeatureBuilder(
-        extractor,
-        ip_column="Destination IP"
-    )
-
-    print("  Building 21-dimensional HGI features for training flows...")
-    t0_feat = time.time()
-    X_train_hgi = training_feature_builder.build_features(
-        train_stream_data,
-        train_nrf,
-        training_centrality
-    )
-    print(f"  HGI features generated in {time.time() - t0_feat:.2f}s (Shape: {X_train_hgi.shape})")
-
-    y_train = train_metadata["Label"].reset_index(drop=True)
-    X_train_hgi = X_train_hgi.reset_index(drop=True)
-
-    # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
-    # TRAIN AND SAVE MODEL ARTIFACT ON 80% TRAIN DATASET
-    # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
-    feature_names = training_feature_builder.get_feature_names()
-    print(f"\n  Training LightGBM model and saving artifact to: {MODEL_FILE}")
-    _ = train_hgi_model(
-        X=X_train_hgi,
-        y=y_train,
-        save_path=MODEL_FILE,
-        s_values=s_values,
-        feature_names=feature_names
-    )
-    print(f"  Training phase completed in {time.time() - t0_train:.2f}s")
-
-    # Load the saved model artifact to ensure persistence and use loaded model for streaming
-    artifact = load_hgi_model(MODEL_FILE)
-    streaming_model = artifact["model"]
+        # Load the saved model artifact to ensure persistence and use loaded model for streaming
+        artifact = load_hgi_model(MODEL_FILE)
+        streaming_model = artifact["model"]
     # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
 
     # 4. Streaming Phase (Held-out 20% Split)
@@ -194,10 +249,16 @@ def main():
         active_vertices = hg.number_of_vertices()
         max_edge_size = extractor.get_max_hyperedge_size(hg)
 
-        # Compute centrality for current sliding hypergraph
+        # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+        # USE WINDOW-ADAPTIVE S-VALUES INSTEAD OF FIXED TRAINING S-VALUES
+        # This re-calibrates s-closeness computation proportionally to the
+        # current window's hypergraph size, fixing the s-value mismatch issue
+        # where training s-values (e.g. s=1163) are too large for 5-min windows.
+        # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
         t_w_cent = time.time()
-        centrality = extractor.compute_centrality(hg)
+        centrality, window_s_vals = extractor.compute_adaptive_centrality(hg)
         cent_duration = time.time() - t_w_cent
+        # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
 
         # Prepare window feature slices
         w_stream_data = stream_stream_data.loc[w_indices]
@@ -265,7 +326,8 @@ def main():
             "processing_time_sec": round(total_w_duration, 4),
             "centrality_time_sec": round(cent_duration, 4),
             "feature_time_sec": round(feat_duration, 4),
-            "predict_time_sec": round(pred_duration, 4)
+            "predict_time_sec": round(pred_duration, 4),
+            "window_s_values": str(window_s_vals)
         }
         window_records.append(record)
 
@@ -274,6 +336,7 @@ def main():
         print(f"[Window #{w_num:02d} Evaluated] Timestamp: {w_timestamp}")
         print(f"  Traffic Stats   : {w_flows_count:,} Flows | {active_hyperedges} Hyperedges | {active_vertices} Vertices")
         print(f"  Graph Topology  : Max Edge Size: {max_edge_size} | s-Closeness Zero Ratio: {zero_s_ratio:.1f}%")
+        print(f"  Adaptive s-vals : Window: {window_s_vals} (Training: {extractor.s_values})")
         print(f"  Window Metrics  : Acc: {w_acc*100:.3f}% | F1: {w_f1:.4f} | Prec: {w_prec:.4f} | Rec: {w_rec:.4f}")
         print(f"  Confusion Matrix: TP: {tp:,} | FP: {fp:,} | TN: {tn:,} | FN: {fn:,}")
         print(f"  Computation Time: Total: {total_w_duration:.3f}s (Centrality: {cent_duration:.3f}s, Features: {feat_duration:.3f}s)")
@@ -287,7 +350,11 @@ def main():
         source_ip = row._1
         destination_ip = row._2
         destination_port = row._3
-        timestamp = row._4
+        # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+        # ACCESS TIMESTAMP BY IDENTIFIER NAME (PREVENTS ATTRIBUTEERROR FOR ROW._4)
+        # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+        timestamp = row.Timestamp
+        # 00000000000000000000000000000000000000000000000000000000000000000000000000000000
 
         hg.add_flow(
             source_ip,
@@ -371,7 +438,7 @@ def main():
     # Export cumulative summary to JSON
     summary_data = {
         "dataset": CSV_PATH,
-        "total_streaming_flows": total_evaluated,
+        "total_streaming_flows": int(total_evaluated),
         "total_windows": window_count,
         "total_streaming_time_sec": round(total_stream_duration, 2),
         "mean_window_processing_time_sec": round(mean_window_time, 4),
@@ -383,10 +450,10 @@ def main():
         "false_positive_rate": round(overall_fpr, 6),
         "false_negative_rate": round(overall_fnr, 6),
         "confusion_matrix": {
-            "true_positives": cumulative_tp,
-            "false_positives": cumulative_fp,
-            "true_negatives": cumulative_tn,
-            "false_negatives": cumulative_fn
+            "true_positives": int(cumulative_tp),
+            "false_positives": int(cumulative_fp),
+            "true_negatives": int(cumulative_tn),
+            "false_negatives": int(cumulative_fn)
         },
         "completed_at": time.strftime("%Y-%m-%d %H:%M:%S")
     }
